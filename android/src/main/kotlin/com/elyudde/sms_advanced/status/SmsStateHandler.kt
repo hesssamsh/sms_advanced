@@ -1,89 +1,88 @@
 package com.elyudde.sms_advanced.status
 
-import android.Manifest
-import android.annotation.TargetApi
 import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
-import android.os.Build
-import com.elyudde.sms_advanced.permisions.Permissions
-import io.flutter.embedding.android.FlutterFragmentActivity
-import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import android.os.Build.VERSION
+import android.os.Build.VERSION_CODES
+import android.telephony.SmsManager
+import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.EventChannel
-import io.flutter.plugin.common.EventChannel.EventSink
-import io.flutter.plugin.common.PluginRegistry.RequestPermissionsResultListener
 
+class SmsStateHandler(
+    private val context: Context,
+    private val eventSink: EventChannel.EventSink?
+) {
 
-/**
- * Created by crazygenius on 1/08/21.
- */
-class SmsStateHandler(val context: Context, private val binding: ActivityPluginBinding) : EventChannel.StreamHandler,
-    RequestPermissionsResultListener {
-    private var smsStateChangeReceiver: BroadcastReceiver? = null
-    private val permissions: Permissions
-    var eventSink: EventSink? = null
-    override fun onListen(argument: Any?, eventSink: EventSink) {
-        this.eventSink = eventSink
-        smsStateChangeReceiver = SmsStateChangeReceiver(eventSink)
-        if (permissions.checkAndRequestPermission(
-                arrayOf(Manifest.permission.RECEIVE_SMS),
-                Permissions.BROADCAST_SMS
-            )
-        ) {
-            registerDeliveredReceiver()
-            registerSentReceiver()
+    private var sentReceiver: SmsSentReceiver? = null
+    private var deliveredReceiver: SmsDeliveredReceiver? = null
+
+    fun startListening() {
+        val sentFilter = IntentFilter(SmsSentReceiver.ACTION_SENT).apply {
+            priority = 1000
+        }
+        val deliveredFilter = IntentFilter(SmsDeliveredReceiver.ACTION_DELIVERED).apply {
+            priority = 1000
+        }
+
+        sentReceiver = SmsSentReceiver(eventSink)
+        deliveredReceiver = SmsDeliveredReceiver(eventSink)
+
+        // Register with proper RECEIVER_EXPORTED flag for Android 14+
+        if (VERSION.SDK_INT >= VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(sentReceiver, sentFilter, ContextCompat.RECEIVER_EXPORTED)
+            context.registerReceiver(deliveredReceiver, deliveredFilter, ContextCompat.RECEIVER_EXPORTED)
+        } else {
+            context.registerReceiver(sentReceiver, sentFilter)
+            context.registerReceiver(deliveredReceiver, deliveredFilter)
         }
     }
 
-    @TargetApi(Build.VERSION_CODES.KITKAT)
-    private fun registerDeliveredReceiver() {
-        context.registerReceiver(
-            smsStateChangeReceiver,
-            IntentFilter("SMS_DELIVERED")
-        )
-    }
-
-    @TargetApi(Build.VERSION_CODES.KITKAT)
-    private fun registerSentReceiver() {
-        context.registerReceiver(
-            smsStateChangeReceiver,
-            IntentFilter("SMS_SENT")
-        )
-    }
-
-    override fun onCancel(argument: Any?) {
-        context.unregisterReceiver(smsStateChangeReceiver)
-        smsStateChangeReceiver = null
-    }
-
-    @TargetApi(Build.VERSION_CODES.KITKAT)
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<String>,
-        grantResults: IntArray
-    ): Boolean {
-        if (requestCode != Permissions.BROADCAST_SMS) {
-            return false
+    fun stopListening() {
+        try {
+            sentReceiver?.let { context.unregisterReceiver(it) }
+            deliveredReceiver?.let { context.unregisterReceiver(it) }
+        } catch (e: IllegalArgumentException) {
+            // Receiver was not registered
         }
-        var isOk = true
-        for (res in grantResults) {
-            if (res != PackageManager.PERMISSION_GRANTED) {
-                isOk = false
-                break
-            }
-        }
-        if (isOk) {
-            registerDeliveredReceiver()
-            registerSentReceiver()
-            return true
-        }
-        eventSink!!.error("#01", "permission denied", null)
-        return false
+        sentReceiver = null
+        deliveredReceiver = null
+    }
+}
+
+// Sent status receiver
+class SmsSentReceiver(private val eventSink: EventChannel.EventSink?) : BroadcastReceiver() {
+    companion object {
+        const val ACTION_SENT = "com.elyudde.sms_advanced.SMS_SENT"
     }
 
-    init {
-        permissions = Permissions(context, binding.activity as FlutterFragmentActivity)
-        binding.addRequestPermissionsResultListener(this)
+    override fun onReceive(context: Context, intent: Intent) {
+        val messageId = intent.getLongExtra("message_id", -1)
+        val result = when (resultCode) {
+            android.app.Activity.RESULT_OK -> "SENT"
+            SmsManager.RESULT_ERROR_GENERIC_FAILURE -> "FAILED_GENERIC"
+            SmsManager.RESULT_ERROR_NO_SERVICE -> "FAILED_NO_SERVICE"
+            SmsManager.RESULT_ERROR_NULL_PDU -> "FAILED_NULL_PDU"
+            SmsManager.RESULT_ERROR_RADIO_OFF -> "FAILED_RADIO_OFF"
+            else -> "FAILED_UNKNOWN"
+        }
+        eventSink?.success(mapOf("id" to messageId, "state" to result))
+    }
+}
+
+// Delivered status receiver
+class SmsDeliveredReceiver(private val eventSink: EventChannel.EventSink?) : BroadcastReceiver() {
+    companion object {
+        const val ACTION_DELIVERED = "com.elyudde.sms_advanced.SMS_DELIVERED"
+    }
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val messageId = intent.getLongExtra("message_id", -1)
+        val result = when (resultCode) {
+            android.app.Activity.RESULT_OK -> "DELIVERED"
+            else -> "NOT_DELIVERED"
+        }
+        eventSink?.success(mapOf("id" to messageId, "state" to result))
     }
 }
